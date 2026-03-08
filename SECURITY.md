@@ -10,8 +10,8 @@ We take the security of our Discord bot project seriously. If you discover a sec
 
 ### How to Report:
 1. **Contact Us Privately**:
-   - Email: [AetherXdevs@outlook.com](mailto:AetherXdevs@outlook.com)
-   - Subject Line: `[Security Issue] [Bot Name]`
+   - Reach out via the support server or GitHub issues.
+   - Subject Line: `[Security Issue] [Project SHDW]`
    - Include a clear description of the issue, steps to reproduce it, the potential impact, and the affected versions. You may also include a video if you desire to do so.
 
 2. **What Happens Next**:

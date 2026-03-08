@@ -5,91 +5,64 @@ import json
 import asyncio
 import sqlite3
 from pathlib import Path
-import importlib
+from datetime import datetime
 
-# Load config.json
+# Load config
 with open(os.path.join(os.path.dirname(__file__), 'config.json')) as f:
     config = json.load(f)
 
 # Cog loading config
-COG_WHITELIST = config.get('COG WHITELIST', [])
-COG_BLACKLIST = config.get('COG BLACKLIST', [])
+COG_BLACKLIST = config.get('COG_BLACKLIST', [])
 LOAD_ALL_COGS = config.get('LOAD_ALL_COGS', True)
-BYPASS_FORCED_BOTMANAGEMENT_PY = config.get('BYPASS_FORCED_BOTMANAGEMENT.PY', False)
-CUSTOM_COGS_WHITELIST = config.get('CUSTOM_COGS_WHITELIST', [])
-CUSTOM_COGS_BLACKLIST = config.get('CUSTOM_COGS_BLACKLIST', [])
+COG_WHITELIST = config.get('COG_WHITELIST', [])
 CUSTOM_COGS_AUTOMATICALLY_LOADED = config.get('CUSTOM_COGS_AUTOMATICALLY_LOADED', True)
+CUSTOM_COGS_BLACKLIST = config.get('CUSTOM_COGS_BLACKLIST', [])
+
 
 async def load_cogs(bot):
     cogs_dir = Path(__file__).parent / 'cogs'
-    for file in cogs_dir.glob('*.py'):
-        if file.name.startswith('_'):
+    loaded = []
+    for file in sorted(cogs_dir.glob('*.py')):
+        if file.name.startswith('_') or file.stem == 'embed_utils':
             continue
         if file.stem in COG_BLACKLIST:
             continue
-        if file.stem == 'botmanagement' and not BYPASS_FORCED_BOTMANAGEMENT_PY:
-            # Always load botmanagement.py unless bypass is enabled
-            try:
-                await bot.load_extension('cogs.botmanagement')
-            except Exception as e:
-                print(f'Failed to load cog cogs.botmanagement: {e}')
-            continue
         cog_name = f"cogs.{file.stem}"
-        # Only load cogs if LOAD_ALL_COGS is True or cog is in whitelist
         if LOAD_ALL_COGS or file.stem in COG_WHITELIST:
             try:
                 await bot.load_extension(cog_name)
+                loaded.append(file.stem)
             except Exception as e:
-                print(f'Failed to load cog {cog_name}: {e}')
+                print(f'  \u274c Failed to load {cog_name}: {e}')
+    print(f'  \u2705 Loaded {len(loaded)} cogs: {", ".join(loaded)}')
 
-    # Load custom cogs if enabled
+    # Custom cogs
     if CUSTOM_COGS_AUTOMATICALLY_LOADED:
-        custom_cogs_dir = Path(__file__).parent / 'custom cogs'
-        for file in custom_cogs_dir.glob('*.py'):
-            if file.name.startswith('_'):
-                continue
-            if file.stem in CUSTOM_COGS_BLACKLIST:
-                continue
-            cog_name = f"custom cogs.{file.stem}"
-            if file.stem in CUSTOM_COGS_WHITELIST or CUSTOM_COGS_AUTOMATICALLY_LOADED:
+        custom_dir = Path(__file__).parent / 'custom cogs'
+        if custom_dir.exists():
+            for file in custom_dir.glob('*.py'):
+                if file.name.startswith('_') or file.stem in CUSTOM_COGS_BLACKLIST:
+                    continue
                 try:
-                    await bot.load_extension(cog_name)
+                    await bot.load_extension(f"custom cogs.{file.stem}")
                 except Exception as e:
-                    print(f'Failed to load custom cog {cog_name}: {e}')
+                    print(f'  \u274c Failed to load custom cog {file.stem}: {e}')
 
-intents = discord.Intents.default()
-intents.message_content = True
 
-# Show startup message if allowed
-if config.get('CONSOLE_STARTUP_MESSAGE_WATERMARK_ALLOWED', True):
-    print('---------------------------------------')
-    print('AETHERX BOT BASEPLATE')
-    print('---------------------------------------')
-
-# Utility: Check if a user is a developer or owner (matches custom check)
-def is_developer_or_owner_id(user_id):
-    owner_ids = config.get('BOT_OWNERS', [])
-    developer_ids = config.get('BOT_DEVELOPERS', [])
-    all_ids = set(owner_ids + developer_ids)
-    return user_id in all_ids
-
-# Get command prefix from config, default to '!'. If in a guild, use the server's prefix from the database if set.
 def get_prefix(bot, message):
-    prefix = config.get('BOT_PREFIX', '!').strip()
-    # User prefix overrides guild prefix
+    prefix = config.get('BOT_PREFIX', '.').strip()
     if message.guild:
         db_path = os.path.join(os.path.dirname(__file__), 'data', 'database.db')
-        user_prefix = None
         try:
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
-            # Check for user-specific prefix
+            # Check user personal prefix
             c.execute("SELECT personal_prefix FROM users WHERE user_id = ?", (message.author.id,))
-            user_row = c.fetchone()
-            if user_row and user_row[0]:
-                user_prefix = user_row[0]
-            # If no user prefix, check for server prefix
-            if not user_prefix:
+            row = c.fetchone()
+            if row and row[0]:
+                prefix = row[0]
+            else:
+                # Check server prefix
                 c.execute("SELECT prefix FROM server_settings WHERE server_id = ?", (message.guild.id,))
                 row = c.fetchone()
                 if row and row[0]:
@@ -97,65 +70,118 @@ def get_prefix(bot, message):
             conn.close()
         except Exception:
             pass
-        if user_prefix:
-            prefix = user_prefix
     return commands.when_mentioned_or(prefix)(bot, message)
+
 
 def get_presence():
     activity_type = config.get('BOT_ACTIVITY_TYPE', 'playing').lower()
-    activity_name = config.get('BOT_ACTIVITY', 'with code')
-    status_str = config.get('BOT_STATUS', 'online').lower()
+    activity_name = config.get('BOT_ACTIVITY', 'with shadows')
+    status_str = config.get('BOT_STATUS', 'dnd').lower()
 
-    if activity_type == 'playing':
-        activity = discord.Game(name=activity_name)
-    elif activity_type == 'streaming':
-        # Use a configurable streaming URL or mark this as a placeholder
-        streaming_url = config.get('BOT_STREAMING_URL', 'https://example.com/stream')  # Placeholder URL
-        activity = discord.Streaming(name=activity_name, url=streaming_url)
-    elif activity_type == 'listening':
-        activity = discord.Activity(type=discord.ActivityType.listening, name=activity_name)
-    elif activity_type == 'watching':
-        activity = discord.Activity(type=discord.ActivityType.watching, name=activity_name)
-    elif activity_type == 'competing':
-        activity = discord.Activity(type=discord.ActivityType.competing, name=activity_name)
-    elif activity_type == 'custom':
-        activity = discord.CustomActivity(name=activity_name)
-    elif activity_type == 'none':
-        activity = None
-    else:
-        activity = discord.Game(name=activity_name)
+    activity_map = {
+        'playing': lambda: discord.Game(name=activity_name),
+        'streaming': lambda: discord.Streaming(name=activity_name, url=config.get('BOT_STREAMING_URL', 'https://twitch.tv/')),
+        'listening': lambda: discord.Activity(type=discord.ActivityType.listening, name=activity_name),
+        'watching': lambda: discord.Activity(type=discord.ActivityType.watching, name=activity_name),
+        'competing': lambda: discord.Activity(type=discord.ActivityType.competing, name=activity_name),
+        'custom': lambda: discord.CustomActivity(name=activity_name),
+        'none': lambda: None,
+    }
+    activity = activity_map.get(activity_type, activity_map['playing'])()
 
-    status = discord.Status.online
-    if status_str == 'idle':
-        status = discord.Status.idle
-    elif status_str == 'dnd':
-        status = discord.Status.dnd
-    elif status_str == 'invisible':
-        status = discord.Status.invisible
+    status_map = {
+        'online': discord.Status.online,
+        'idle': discord.Status.idle,
+        'dnd': discord.Status.dnd,
+        'invisible': discord.Status.invisible,
+    }
+    status = status_map.get(status_str, discord.Status.online)
     return activity, status
 
+
+intents = discord.Intents.all()
+
+
 async def start_bot(token):
-    bot = commands.Bot(command_prefix=get_prefix, intents=intents)
+    bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
     bot.config = config
-    async def update_presence():
-        while True:
-            activity, status = get_presence()
-            await bot.change_presence(activity=activity, status=status)
-            await asyncio.sleep(30)
+    bot.start_time = datetime.utcnow()
+    bot.snipes = {}
+    bot.edit_snipes = {}
+    bot.afk_users = {}
+
+    @bot.event
     async def on_ready():
-        bot.loop.create_task(update_presence())
-        print(f'Logged in as {bot.user}')
+        print(f'\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510')
+        print(f'\u2502  Project SHDW v2.0                     \u2502')
+        print(f'\u2502  Logged in as {bot.user}')
+        print(f'\u2502  Servers: {len(bot.guilds)} | Users: {len(bot.users)}')
+        print(f'\u2502  Prefix: {config.get("BOT_PREFIX", ".")}')
+        print(f'\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n')
         await load_cogs(bot)
-    bot.event(on_ready)
+        activity, status = get_presence()
+        await bot.change_presence(activity=activity, status=status)
+
+    @bot.event
+    async def on_message_delete(message):
+        if message.author.bot:
+            return
+        bot.snipes[message.channel.id] = {
+            'author': message.author,
+            'content': message.content,
+            'time': datetime.utcnow(),
+            'attachments': [a.url for a in message.attachments]
+        }
+
+    @bot.event
+    async def on_message_edit(before, after):
+        if before.author.bot:
+            return
+        bot.edit_snipes[before.channel.id] = {
+            'author': before.author,
+            'before': before.content,
+            'after': after.content,
+            'time': datetime.utcnow()
+        }
+
+    @bot.event
+    async def on_message(message):
+        if message.author.bot:
+            return
+        # AFK check
+        if message.author.id in bot.afk_users:
+            del bot.afk_users[message.author.id]
+            try:
+                await message.channel.send(
+                    f"Welcome back {message.author.mention}, I removed your AFK.",
+                    delete_after=5
+                )
+            except Exception:
+                pass
+        # Check if mentioned users are AFK
+        for user in message.mentions:
+            if user.id in bot.afk_users:
+                afk_data = bot.afk_users[user.id]
+                try:
+                    await message.channel.send(
+                        f"{user.display_name} is AFK: **{afk_data['reason']}** \u2014 <t:{int(afk_data['time'].timestamp())}:R>",
+                        delete_after=8
+                    )
+                except Exception:
+                    pass
+        await bot.process_commands(message)
+
     await bot.start(token)
 
+
 async def main():
-    TOKENS = config.get('DISCORD_BOT_TOKEN')
-    if isinstance(TOKENS, str):
-        TOKENS = [TOKENS] if TOKENS else []
-    if not TOKENS:
-        raise ValueError("No Bot Token provided. Set the DISCORD_BOT_TOKEN in config.json.")
-    await asyncio.gather(*(start_bot(token) for token in TOKENS))
+    tokens = config.get('DISCORD_BOT_TOKEN')
+    if isinstance(tokens, str):
+        tokens = [tokens] if tokens else []
+    if not tokens:
+        raise ValueError("No bot token in config.json")
+    await asyncio.gather(*(start_bot(t) for t in tokens))
+
 
 if __name__ == "__main__":
     asyncio.run(main())

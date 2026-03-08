@@ -1,201 +1,124 @@
 import discord
 from discord.ext import commands
-from discord.ui import Button, View
-from functools import partial
+from discord.ui import Select, View, Button
+from .embed_utils import make_embed, Colors
 
-class Uncatagorized(commands.Cog):
-    """A cog to handle uncategorized commands and provide a help command."""
+
+class HelpSelect(Select):
+    def __init__(self, bot, ctx):
+        self.bot_ref = bot
+        self.ctx = ctx
+        options = []
+        for cog_name, cog in bot.cogs.items():
+            if cog_name in ('Help', 'Webserver'):
+                continue
+            cmds = [c for c in cog.get_commands() if not c.hidden]
+            if cmds:
+                emoji_map = {
+                    'General': '\U0001f3e0', 'Moderation': '\U0001f6e1\ufe0f',
+                    'Fun': '\U0001f389', 'Games': '\U0001f3b2',
+                    'Leveling': '\U0001f4c8', 'Economy': '\U0001f4b0',
+                    'Music': '\U0001f3b5', 'User': '\U0001f464',
+                    'BotManagement': '\u2699\ufe0f', 'Utility': '\U0001f527',
+                }
+                emoji = emoji_map.get(cog_name, '\U0001f4c1')
+                options.append(discord.SelectOption(
+                    label=cog_name, description=f"{len(cmds)} commands",
+                    emoji=emoji, value=cog_name
+                ))
+        super().__init__(placeholder="\U0001f50d Select a category...", options=options or [
+            discord.SelectOption(label="No categories", value="none")
+        ])
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("This isn't your menu.", ephemeral=True)
+        cog = self.bot_ref.get_cog(self.values[0])
+        if not cog:
+            return
+        cmds = [c for c in cog.get_commands() if not c.hidden]
+        desc_lines = []
+        for cmd in cmds:
+            aliases = f" `{'`, `'.join(cmd.aliases)}`" if cmd.aliases else ""
+            desc_lines.append(f"> `.{cmd.qualified_name}`{aliases}\n> {cmd.help or 'No description.'}\n")
+        embed = make_embed(
+            title=f"\U0001f4c2 {self.values[0]} Commands",
+            description="\n".join(desc_lines) or "No commands.",
+            color=Colors.PURPLE, ctx=self.ctx
+        )
+        embed.set_thumbnail(url=self.bot_ref.user.display_avatar.url)
+        await interaction.response.edit_message(embed=embed)
+
+
+class HelpView(View):
+    def __init__(self, bot, ctx):
+        super().__init__(timeout=120)
+        self.add_item(HelpSelect(bot, ctx))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class Help(commands.Cog):
+    """Custom help command with dropdown navigation."""
     def __init__(self, bot):
         self.bot = bot
-        self.config = getattr(bot, 'config', {})
 
-    @commands.hybrid_command(name="help", description="Show help for all cogs or commands.", hidden=True)
-    async def help(self, ctx, *, arg: str = None):
-        """Show help for all cogs or commands available to the user. Use '!help <cog>' to see commands in a cog, or '!help list' for all commands."""
-        embed = discord.Embed(
-            title=f"{self.bot.user.name} Help" if self.bot.user else "Bot Help",
-            color=discord.Color.green()
+    @commands.hybrid_command(name="help")
+    async def help_cmd(self, ctx, *, command: str = None):
+        """Shows all commands or info about a specific command."""
+        if command:
+            cmd = self.bot.get_command(command)
+            if not cmd:
+                return await ctx.send(embed=make_embed(
+                    description=f"\u274c Command `{command}` not found.",
+                    color=Colors.ERROR, ctx=ctx
+                ))
+            aliases = ", ".join(f"`.{a}`" for a in cmd.aliases) if cmd.aliases else "None"
+            usage = f".{cmd.qualified_name} {cmd.signature}" if cmd.signature else f".{cmd.qualified_name}"
+            embed = make_embed(
+                title=f"\U0001f4cb Command: .{cmd.qualified_name}",
+                color=Colors.INFO, ctx=ctx
+            )
+            embed.add_field(name="\U0001f4dd Description", value=cmd.help or "No description.", inline=False)
+            embed.add_field(name="\U0001f4e6 Usage", value=f"`{usage}`", inline=False)
+            embed.add_field(name="\U0001f504 Aliases", value=aliases, inline=False)
+            if cmd.cog:
+                embed.add_field(name="\U0001f4c1 Category", value=cmd.cog.qualified_name, inline=False)
+            return await ctx.send(embed=embed)
+
+        total_cmds = sum(1 for c in self.bot.walk_commands() if not c.hidden)
+        embed = make_embed(
+            title="\U0001f30c Project SHDW Help Menu",
+            description=(
+                f"**Total Commands:** `{total_cmds}`\n"
+                f"**Prefix:** `.`\n\n"
+                f"Select a category from the dropdown below to view its commands.\n"
+                f"Use `.help <command>` for detailed info on a command."
+            ),
+            color=Colors.PURPLE, ctx=ctx
         )
-        # If 'list' is passed, show all commands as before
-        if arg and arg.strip().lower() == "list":
-            embed.description = "List of all available commands:"
-            for cog_name, cog in self.bot.cogs.items():
-                commands_list = []
-                for cmd in cog.get_commands():
-                    if not cmd.hidden:
-                        try:
-                            if await cmd.can_run(ctx):
-                                aliases = f" (aliases: {', '.join(cmd.aliases)})" if getattr(cmd, 'aliases', None) else ""
-                                commands_list.append(f"{cmd.name}{aliases} - {cmd.help or 'No description.'}")
-                        except Exception:
-                            continue
-                if commands_list:
-                    embed.add_field(
-                        name=f"{getattr(cog, 'qualified_name', cog_name)}",
-                        value="\n".join(commands_list),
-                        inline=False
-                    )
-            # Also include uncategorized commands (not in a cog)
-            uncategorized = []
-            for cmd in self.bot.commands:
-                if not cmd.cog and not cmd.hidden:
-                    try:
-                        if await cmd.can_run(ctx):
-                            aliases = f" (aliases: {', '.join(cmd.aliases)})" if getattr(cmd, 'aliases', None) else ""
-                            uncategorized.append(f"/{cmd.name}{aliases} - {cmd.help or 'No description.'}")
-                    except Exception:
-                        continue
-            if uncategorized:
-                embed.add_field(name="Other", value="\n".join(uncategorized), inline=False)
-            embed.set_footer(text=f"Requested by {ctx.author}")
-            await ctx.send(embed=embed)
-            return
-        # If a cog name is passed, show commands for that cog, with pagination support
-        if arg:
-            import re
-            match = re.match(r"([a-zA-Z0-9_]+)(\d+)?$", arg.strip())
-            if match:
-                cog_arg = match.group(1)
-            else:
-                cog_arg = arg
-            cog = self.bot.cogs.get(cog_arg)
-            if not cog:
-                # Try case-insensitive match
-                cog = next((c for n, c in self.bot.cogs.items() if n.lower() == cog_arg.lower()), None)
-            if cog:
-                commands_list = []
-                for cmd in cog.get_commands():
-                    if not cmd.hidden:
-                        try:
-                            if await cmd.can_run(ctx):
-                                aliases = f" (aliases: {', '.join(cmd.aliases)})" if getattr(cmd, 'aliases', None) else ""
-                                commands_list.append(f"- **{cmd.name}**{aliases} - {cmd.help or '__***No description.***__'}")
-                        except Exception:
-                            continue
-                if commands_list:
-                    max_per_page = 10
-                    total_pages = (len(commands_list) + max_per_page - 1) // max_per_page
-                    page = 1
-                    def get_embed(page):
-                        embed = discord.Embed(
-                            title=f"{getattr(cog, 'qualified_name', cog_arg)} Commands (Page {page})",
-                            description=getattr(cog, '__doc__', None) or "No description.",
-                            color=discord.Color.green()
-                        )
-                        start = (page - 1) * max_per_page
-                        end = start + max_per_page
-                        chunk = commands_list[start:end]
-                        embed.add_field(
-                            name=f"Commands {start+1}-{min(end, len(commands_list))} of {len(commands_list)}",
-                            value="\n".join(chunk),
-                            inline=False
-                        )
-                        if total_pages > 1:
-                            embed.set_footer(text=f"Requested by {ctx.author} | Page {page}/{total_pages}")
-                        else:
-                            embed.set_footer(text=f"Requested by {ctx.author}")
-                        return embed
-                    class HelpView(View):
-                        def __init__(self, *, timeout=60):
-                            super().__init__(timeout=timeout)
-                            self.page = 1
-                        async def update(self, interaction):
-                            await interaction.response.edit_message(embed=get_embed(self.page), view=self)
-                        @discord.ui.button(label='Previous', style=discord.ButtonStyle.primary, disabled=True)
-                        async def previous(self, interaction: discord.Interaction, button: Button):
-                            self.page -= 1
-                            self.next.disabled = False
-                            if self.page == 1:
-                                button.disabled = True
-                            await self.update(interaction)
-                        @discord.ui.button(label='Next', style=discord.ButtonStyle.primary, disabled=(total_pages <= 1))
-                        async def next(self, interaction: discord.Interaction, button: Button):
-                            self.page += 1
-                            self.previous.disabled = False
-                            if self.page == total_pages:
-                                button.disabled = True
-                            await self.update(interaction)
-                    view = HelpView()
-                    if total_pages == 1:
-                        view.previous.disabled = True
-                        view.next.disabled = True
-                    await ctx.send(embed=get_embed(1), view=view)
-                    return
-                else:
-                    embed = discord.Embed(description=f"No commands available in cog '{cog_arg}' for you.", color=discord.Color.red())
-                    await ctx.send(embed=embed)
-                    return
-            else:
-                embed = discord.Embed(description=f"Cog '{arg}' not found.", color=discord.Color.red())
-                await ctx.send(embed=embed)
-                return
-        # Default: Show all cogs with at least one command the user can run
-        embed.description = "Select a category below to see its commands. Use `!help <cog>` to view commands in a category."
-        max_per_cog = 4
+        embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+
+        categories = []
         for cog_name, cog in self.bot.cogs.items():
-            commands_list = []
-            for cmd in cog.get_commands():
-                if not cmd.hidden:
-                    try:
-                        if await cmd.can_run(ctx):
-                            commands_list.append(f"{cmd.name}")
-                    except Exception:
-                        continue
-            if commands_list:
-                cog_desc = getattr(cog, '__doc__', None) or "No description."
-                shown_cmds = commands_list[:max_per_cog]
-                more = f" (+{len(commands_list) - max_per_cog} more...)" if len(commands_list) > max_per_cog else ""
-                value = f"{cog_desc}\nCommands: {', '.join(shown_cmds)}{more}"
-                # If too many commands, add a button for full list
-                if len(commands_list) > max_per_cog:
-                    value += f"\nUse `!help {cog_name}` to see all commands in this category."
-                embed.add_field(
-                    name=f"{getattr(cog, 'qualified_name', cog_name)}",
-                    value=value,
-                    inline=False
-                )
-        # Also include uncategorized commands (not in a cog)
-        uncategorized = []
-        for cmd in self.bot.commands:
-            if not cmd.cog and not cmd.hidden:
-                try:
-                    if await cmd.can_run(ctx):
-                        uncategorized.append(f"{cmd.name}")
-                except Exception:
-                    continue
-        if uncategorized:
-            shown_uncat = uncategorized[:max_per_cog]
-            more = f" (+{len(uncategorized) - max_per_cog} more...)" if len(uncategorized) > max_per_cog else ""
-            embed.add_field(name="Other", value=f"Commands: {', '.join(shown_uncat)}{more}", inline=False)
-        embed.set_footer(text=f"Requested by {ctx.author}")
-        await ctx.send(embed=embed)
+            if cog_name in ('Help', 'Webserver'):
+                continue
+            cmds = [c for c in cog.get_commands() if not c.hidden]
+            if cmds:
+                emoji_map = {
+                    'General': '\U0001f3e0', 'Moderation': '\U0001f6e1\ufe0f',
+                    'Fun': '\U0001f389', 'Games': '\U0001f3b2',
+                    'Leveling': '\U0001f4c8', 'Economy': '\U0001f4b0',
+                    'Music': '\U0001f3b5', 'User': '\U0001f464',
+                    'BotManagement': '\u2699\ufe0f', 'Utility': '\U0001f527',
+                }
+                emoji = emoji_map.get(cog_name, '\U0001f4c1')
+                categories.append(f"{emoji} **{cog_name}** \u2014 `{len(cmds)}` commands")
+        embed.add_field(name="\U0001f4da Categories", value="\n".join(categories) or "None loaded.", inline=False)
+        await ctx.send(embed=embed, view=HelpView(self.bot, ctx))
 
-    @commands.command(name="introduction", description="What to do next?", hidden=True)
-    async def whattodo(self, ctx):
-        """Provide a message to guide users on what to do next."""
-        embed = discord.Embed(
-            title="What to do next?",
-            description="Use `!help <cog>` to see commands in a specific category, or `!help list` for all commands.",
-            color=discord.Color.blue()
-        )
-        embed.add_field(
-            name="Setting up your profile",
-            value="Use `!settings` to set up your profile."
-        )
-        embed.add_field(
-            name="Seeing profiles",
-            value="Use `!profile <user>` to see a user's profile."
-        )
-        embed.set_footer(text=f"Requested by {ctx.author}")
-        await ctx.send(embed=embed)
-
-    # Override the default help command
-    def cog_unload(self):
-        self.bot.help_command = self._original_help_command
-
-    async def cog_load(self):
-        self._original_help_command = self.bot.help_command
 
 async def setup(bot):
-    bot.help_command = None
-    await bot.add_cog(Uncatagorized(bot))
+    await bot.add_cog(Help(bot))

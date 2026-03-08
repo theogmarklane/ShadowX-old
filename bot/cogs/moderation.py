@@ -1,374 +1,388 @@
 import discord
 from discord.ext import commands
-from discord.ext.commands import has_permissions, Bot, Context
+from discord.ext.commands import has_permissions
 import os
 import sqlite3
+from datetime import timedelta
+from .embed_utils import make_embed, success_embed, error_embed, warning_embed, Colors
 
-def is_eligable():
+
+def is_dev_or_owner():
     async def predicate(ctx):
-        # Always allow if the user is a bot owner or developer
         config = getattr(ctx.bot, 'config', {})
-        owner_ids = config.get('BOT_OWNERS', [])
-        developer_ids = config.get('BOT_DEVELOPERS', [])
-        all_ids = set(owner_ids + developer_ids)
-        if await ctx.bot.is_owner(ctx.author) or ctx.author.id in all_ids:
-            return True
-        # Only allow if the server has at least 100 human (non-bot) members
-        if ctx.guild is None:
-            return False
-        human_members = [m for m in ctx.guild.members if not m.bot]
-        return len(human_members) >= 100
+        ids = set(config.get('BOT_OWNERS', []) + config.get('BOT_DEVELOPERS', []))
+        return ctx.author.id in ids or await ctx.bot.is_owner(ctx.author)
     return commands.check(predicate)
 
+
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS warnings (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER, user_id INTEGER, moderator_id INTEGER, reason TEXT, timestamp TEXT)")
+    return conn
+
+
 class Moderation(commands.Cog):
-    """A cog to handle moderation commands like kick, ban, and clear messages."""
-    def __init__(self, bot: Bot):
+    """Server moderation and management commands."""
+    def __init__(self, bot):
         self.bot = bot
-        self.config = getattr(bot, 'config', {})
 
-    @commands.command()
+    # ── Kick / Ban / Unban ──────────────────────────────────
+
+    @commands.hybrid_command()
     @has_permissions(kick_members=True)
-    async def kick(self, ctx: Context, member: discord.Member, *, reason: str = None):
+    async def kick(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
         """Kick a member from the server."""
-        try:
-            await member.kick(reason=reason)
-            # Ensure user exists in the database before removing karma
-            db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("INSERT OR IGNORE INTO users (user_id, karma) VALUES (?, 0)", (member.id,))
-            c.execute("UPDATE users SET karma = karma - 5 WHERE user_id = ?", (member.id,))
-            conn.commit()
-            conn.close()
-            embed = discord.Embed(description=f"{member.mention} has been kicked. Reason: {reason if reason else 'No reason provided.'}", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to kick {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command()
-    @has_permissions(ban_members=True)
-    async def ban(self, ctx: Context, member: discord.Member, *, reason: str = None):
-        """Ban a member from the server."""
-        try:
-            await member.ban(reason=reason)
-            # Ensure user exists in the database before removing karma
-            db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("INSERT OR IGNORE INTO users (user_id, karma) VALUES (?, 0)", (member.id,))
-            c.execute("UPDATE users SET karma = karma - 10 WHERE user_id = ?", (member.id,))
-            conn.commit()
-            conn.close()
-            embed = discord.Embed(description=f"{member.mention} has been banned. Reason: {reason if reason else 'No reason provided.'}", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to ban {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command()
-    @has_permissions(manage_messages=True)
-    async def clear(self, ctx: Context, amount: int = 5):
-        """Clear a number of messages from the channel (default 5)."""
-        deleted = await ctx.channel.purge(limit=amount+1)  # +1 to include the command message
-        embed = discord.Embed(description=f"Deleted {len(deleted)-1} messages.", color=discord.Color.orange())
-        await ctx.send(embed=embed, delete_after=3)
-
-    @commands.command()
-    @has_permissions(manage_guild=True)
-    async def remove_bot(self, ctx: Context):
-        """Remove the bot from the server."""
-        if ctx.guild.me.guild_permissions.administrator:
-            embed = discord.Embed(description="I cannot remove myself from this server as I have administrator permissions.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await ctx.guild.leave()
-            embed = discord.Embed(description="I have left the server.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to leave the server: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(hidden=True)
-    @has_permissions(manage_guild=True)
-    async def ban_bot(self, ctx: Context):
-        """Ban the bot from the server."""
-        if ctx.guild.me.guild_permissions.administrator:
-            embed = discord.Embed(description="I cannot ban myself from this server as I have administrator permissions.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await ctx.guild.ban(ctx.guild.me, reason="Bot banned by command.")
-            embed = discord.Embed(description="I have been banned from the server, f u n n y  t i m e", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to ban the bot: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['chillchat', 'chill'])
-    @has_permissions(manage_channels=True)
-    async def slowmode(self, ctx: Context, seconds: int = 0):
-        """Set the slowmode for the channel in seconds (0 to disable)."""
-        if seconds < 0:
-            embed = discord.Embed(description="Slowmode cannot be set to a negative value.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        elif seconds > 21600:  # 6 hours
-            embed = discord.Embed(description="Slowmode cannot be set to more than 6 hours (21600 seconds). \n-# This is a Discord limitation, and i added this to prevent my broken code from breaking my terminal.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await ctx.channel.edit(slowmode_delay=seconds)
-            embed = discord.Embed(description=f"Slowmode set to {seconds} seconds.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to set slowmode: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['lock'])
-    @has_permissions(manage_channels=True)
-    async def lock_channel(self, ctx: Context):
-        """Lock the current channel so only admins can send messages."""
-        try:
-            await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-            embed = discord.Embed(description=f"{ctx.channel.mention} has been locked.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to lock the channel: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['unlock'])
-    @has_permissions(manage_channels=True)
-    async def unlock_channel(self, ctx: Context):
-        """Unlock the current channel so everyone can send messages."""
-        try:
-            await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-            embed = discord.Embed(description=f"{ctx.channel.mention} has been unlocked.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to unlock the channel: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['mute'])
-    @has_permissions(mute_members=True)
-    async def mute_member(self, ctx: Context, member: discord.Member, *, reason: str = None):
-        """Mute a member in the server."""
-        if not ctx.guild.me.guild_permissions.manage_roles:
-            embed = discord.Embed(description="I do not have permission to manage roles.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
-        if not mute_role:
-            try:
-                mute_role = await ctx.guild.create_role(name="Muted", reason="Mute role created by moderation command.")
-                for channel in ctx.guild.channels:
-                    await channel.set_permissions(mute_role, send_messages=False, speak=False)
-            except Exception as e:
-                embed = discord.Embed(description=f"Failed to create mute role: {e}", color=discord.Color.red())
-                await ctx.send(embed=embed)
-                return
-        try:
-            await member.add_roles(mute_role, reason=reason)
-            # Ensure user exists in the database before removing karma
-            db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("INSERT OR IGNORE INTO users (user_id, karma) VALUES (?, 0)", (member.id,))
-            c.execute("UPDATE users SET karma = karma - 2 WHERE user_id = ?", (member.id,))
-            conn.commit()
-            conn.close()
-            embed = discord.Embed(description=f"{member.mention} has been muted. Reason: {reason if reason else 'No reason provided.'}", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to mute {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['unmute'])
-    @has_permissions(mute_members=True)
-    async def unmute_member(self, ctx: Context, member: discord.Member):
-        """Unmute a member in the server."""
-        if not ctx.guild.me.guild_permissions.manage_roles:
-            embed = discord.Embed(description="I do not have permission to manage roles.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
-        if not mute_role:
-            embed = discord.Embed(description="There is no 'Muted' role in this server.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await member.remove_roles(mute_role, reason="Unmuted by moderation command.")
-            embed = discord.Embed(description=f"{member.mention} has been unmuted.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to unmute {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['timeout', 'tempmute'])
-    @has_permissions(moderate_members=True)
-    async def timeout_member(self, ctx: Context, member: discord.Member, duration: int, *, reason: str = None):
-        """Timeout a member for a specified duration in seconds."""
-        if not ctx.guild.me.guild_permissions.moderate_members:
-            embed = discord.Embed(description="I do not have permission to moderate members.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await member.timeout(duration=duration, reason=reason)
-            # Ensure user exists in the database before removing karma
-            db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-            conn = sqlite3.connect(db_path)
-            c = conn.cursor()
-            c.execute("INSERT OR IGNORE INTO users (user_id, karma) VALUES (?, 0)", (member.id,))
-            c.execute("UPDATE users SET karma = karma - 1 WHERE user_id = ?", (member.id,))
-            conn.commit()
-            conn.close()
-            embed = discord.Embed(description=f"{member.mention} has been timed out for {duration} seconds. Reason: {reason if reason else 'No reason provided.'}", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to timeout {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.command(aliases=['untimeout', 'untimemute'])
-    @has_permissions(moderate_members=True)
-    async def untimeout_member(self, ctx: Context, member: discord.Member):
-        """Remove timeout from a member."""
-        if not ctx.guild.me.guild_permissions.moderate_members:
-            embed = discord.Embed(description="I do not have permission to moderate members.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        try:
-            await member.timeout(None, reason="Timeout removed by moderation command.")
-            embed = discord.Embed(description=f"{member.mention} has been removed from timeout.", color=discord.Color.orange())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(description=f"Failed to remove timeout from {member.mention}: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-
-    @commands.hybrid_command(aliases=['showkarma', 'checkkarma'])
-    async def karma(self, ctx: Context, member: discord.Member = None):
-        """Check or modify a member's karma."""
-        if not member:
-            member = ctx.author
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("SELECT karma FROM users WHERE user_id = ?", (member.id,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            embed = discord.Embed(description=f"{member.mention} does not have karma.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        karma = row[0]
-        embed = discord.Embed(description=f"{member.mention} has {karma} karma points.", color=discord.Color.green())
-        embed.add_field(name="", value="-# Karma is a measure of a member's contributions to Discord communities, ***this can be biased.***", inline=False)
-        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url)
+        if member.top_role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("You can't kick someone with an equal or higher role.", ctx))
+        await member.kick(reason=f"{ctx.author}: {reason}")
+        embed = make_embed(
+            title="\U0001f462 Member Kicked",
+            color=Colors.WARNING, ctx=ctx
+        )
+        embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=True)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.command(aliases=['addkarma'])
-    @has_permissions(administrator=True)
-    @is_eligable()
-    async def add_karma(self, ctx: Context, member: discord.Member, amount: int):
-        """Add karma to a member."""
-        if amount <= 0:
-            embed = discord.Embed(description="You must add a positive amount of karma.", color=discord.Color.red())
-            await ctx.send(embed=embed)
-            return
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+    @commands.hybrid_command()
+    @has_permissions(ban_members=True)
+    async def ban(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Ban a member from the server."""
+        if member.top_role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("You can't ban someone with an equal or higher role.", ctx))
+        await member.ban(reason=f"{ctx.author}: {reason}")
+        embed = make_embed(
+            title="\U0001f528 Member Banned",
+            color=Colors.ERROR, ctx=ctx
+        )
+        embed.add_field(name="Member", value=f"{member.mention} (`{member.id}`)", inline=True)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command()
+    @has_permissions(ban_members=True)
+    async def unban(self, ctx, user_id: int, *, reason: str = "No reason provided"):
+        """Unban a user by their ID."""
+        user = await self.bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=f"{ctx.author}: {reason}")
+        await ctx.send(embed=success_embed(f"**{user}** has been unbanned.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(ban_members=True)
+    async def softban(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Ban and immediately unban a member to delete their messages."""
+        if member.top_role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("You can't softban someone with an equal or higher role.", ctx))
+        await member.ban(reason=f"Softban by {ctx.author}: {reason}", delete_message_days=7)
+        await ctx.guild.unban(member, reason="Softban unban")
+        embed = make_embed(
+            title="\U0001f4a8 Member Softbanned",
+            description=f"{member.mention} was softbanned (messages deleted).",
+            color=Colors.WARNING, ctx=ctx
+        )
+        embed.add_field(name="Reason", value=reason, inline=False)
+        await ctx.send(embed=embed)
+
+    # ── Message Management ──────────────────────────────────
+
+    @commands.hybrid_command(aliases=["purge", "prune"])
+    @has_permissions(manage_messages=True)
+    async def clear(self, ctx, amount: int = 10):
+        """Delete a number of messages from the channel."""
+        if amount < 1 or amount > 500:
+            return await ctx.send(embed=error_embed("Amount must be between 1 and 500.", ctx))
+        deleted = await ctx.channel.purge(limit=amount + 1)
+        await ctx.send(
+            embed=success_embed(f"Deleted **{len(deleted) - 1}** messages.", ctx),
+            delete_after=4
+        )
+
+    @commands.hybrid_command()
+    @has_permissions(manage_channels=True)
+    async def nuke(self, ctx):
+        """Clone the channel and delete the original (clears all messages)."""
+        confirm_embed = make_embed(
+            title="\u26a0\ufe0f Nuke Channel?",
+            description=f"This will **delete** {ctx.channel.mention} and create a clone. All messages will be lost.\n\nReact with \u2705 to confirm.",
+            color=Colors.ERROR, ctx=ctx
+        )
+        msg = await ctx.send(embed=confirm_embed)
+        await msg.add_reaction("\u2705")
+
+        def check(r, u):
+            return u == ctx.author and str(r.emoji) == "\u2705" and r.message.id == msg.id
+
+        try:
+            await self.bot.wait_for("reaction_add", check=check, timeout=15)
+        except Exception:
+            return await ctx.send(embed=warning_embed("Nuke cancelled.", ctx))
+
+        new_channel = await ctx.channel.clone(reason=f"Nuked by {ctx.author}")
+        await ctx.channel.delete()
+        await new_channel.send(embed=make_embed(
+            title="\U0001f4a5 Channel Nuked",
+            description="This channel has been nuked and recreated.",
+            color=Colors.ERROR
+        ))
+
+    # ── Channel Management ──────────────────────────────────
+
+    @commands.hybrid_command(aliases=["slow"])
+    @has_permissions(manage_channels=True)
+    async def slowmode(self, ctx, seconds: int = 0):
+        """Set channel slowmode (0 to disable, max 21600)."""
+        if seconds < 0 or seconds > 21600:
+            return await ctx.send(embed=error_embed("Slowmode must be between 0 and 21600 seconds.", ctx))
+        await ctx.channel.edit(slowmode_delay=seconds)
+        if seconds == 0:
+            await ctx.send(embed=success_embed("Slowmode disabled.", ctx))
+        else:
+            await ctx.send(embed=success_embed(f"Slowmode set to **{seconds}s**.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_channels=True)
+    async def lock(self, ctx, channel: discord.TextChannel = None):
+        """Lock a channel so members can't send messages."""
+        channel = channel or ctx.channel
+        await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+        embed = make_embed(
+            title="\U0001f510 Channel Locked",
+            description=f"{channel.mention} has been locked.",
+            color=Colors.ERROR, ctx=ctx
+        )
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command()
+    @has_permissions(manage_channels=True)
+    async def unlock(self, ctx, channel: discord.TextChannel = None):
+        """Unlock a channel so members can send messages."""
+        channel = channel or ctx.channel
+        await channel.set_permissions(ctx.guild.default_role, send_messages=True)
+        embed = make_embed(
+            title="\U0001f513 Channel Unlocked",
+            description=f"{channel.mention} has been unlocked.",
+            color=Colors.SUCCESS, ctx=ctx
+        )
+        await ctx.send(embed=embed)
+
+    # ── Member Management ───────────────────────────────────
+
+    @commands.hybrid_command()
+    @has_permissions(moderate_members=True)
+    async def timeout(self, ctx, member: discord.Member, duration: int, *, reason: str = "No reason provided"):
+        """Timeout a member (duration in minutes)."""
+        if member.top_role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("Can't timeout someone with an equal or higher role.", ctx))
+        await member.timeout(timedelta(minutes=duration), reason=f"{ctx.author}: {reason}")
+        embed = make_embed(
+            title="\u23f3 Member Timed Out",
+            color=Colors.WARNING, ctx=ctx
+        )
+        embed.add_field(name="Member", value=member.mention, inline=True)
+        embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command()
+    @has_permissions(moderate_members=True)
+    async def untimeout(self, ctx, member: discord.Member):
+        """Remove a member's timeout."""
+        await member.timeout(None, reason=f"Removed by {ctx.author}")
+        await ctx.send(embed=success_embed(f"Removed timeout from {member.mention}.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_roles=True)
+    async def mute(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Mute a member by giving them a Muted role."""
+        mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
+        if not mute_role:
+            mute_role = await ctx.guild.create_role(name="Muted", reason="Mute role created")
+            for ch in ctx.guild.channels:
+                await ch.set_permissions(mute_role, send_messages=False, speak=False, add_reactions=False)
+        await member.add_roles(mute_role, reason=f"{ctx.author}: {reason}")
+        embed = make_embed(title="\U0001f507 Member Muted", color=Colors.WARNING, ctx=ctx)
+        embed.add_field(name="Member", value=member.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=True)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command()
+    @has_permissions(manage_roles=True)
+    async def unmute(self, ctx, member: discord.Member):
+        """Unmute a member by removing the Muted role."""
+        mute_role = discord.utils.get(ctx.guild.roles, name="Muted")
+        if not mute_role or mute_role not in member.roles:
+            return await ctx.send(embed=error_embed("That member isn't muted.", ctx))
+        await member.remove_roles(mute_role, reason=f"Unmuted by {ctx.author}")
+        await ctx.send(embed=success_embed(f"{member.mention} has been unmuted.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_nicknames=True)
+    async def nick(self, ctx, member: discord.Member, *, nickname: str = None):
+        """Change a member's nickname (leave empty to reset)."""
+        await member.edit(nick=nickname)
+        if nickname:
+            await ctx.send(embed=success_embed(f"Changed {member.mention}'s nickname to **{nickname}**.", ctx))
+        else:
+            await ctx.send(embed=success_embed(f"Reset {member.mention}'s nickname.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_roles=True)
+    async def addrole(self, ctx, member: discord.Member, *, role: discord.Role):
+        """Add a role to a member."""
+        if role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("You can't add a role higher than or equal to yours.", ctx))
+        await member.add_roles(role, reason=f"Added by {ctx.author}")
+        await ctx.send(embed=success_embed(f"Added {role.mention} to {member.mention}.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_roles=True)
+    async def removerole(self, ctx, member: discord.Member, *, role: discord.Role):
+        """Remove a role from a member."""
+        if role >= ctx.author.top_role:
+            return await ctx.send(embed=error_embed("You can't remove a role higher than or equal to yours.", ctx))
+        await member.remove_roles(role, reason=f"Removed by {ctx.author}")
+        await ctx.send(embed=success_embed(f"Removed {role.mention} from {member.mention}.", ctx))
+
+    # ── Warning System ──────────────────────────────────────
+
+    @commands.hybrid_command()
+    @has_permissions(manage_messages=True)
+    async def warn(self, ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Warn a member."""
+        from datetime import datetime
+        conn = get_db()
         c = conn.cursor()
-        # Ensure user exists in the database
-        c.execute("INSERT OR IGNORE INTO users (user_id, karma) VALUES (?, 0)", (member.id,))
-        # Add karma
-        c.execute("UPDATE users SET karma = karma + ? WHERE user_id = ?", (amount, member.id))
+        c.execute(
+            "INSERT INTO warnings (server_id, user_id, moderator_id, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (ctx.guild.id, member.id, ctx.author.id, reason, datetime.utcnow().isoformat())
+        )
+        warn_id = c.lastrowid
+        c.execute("SELECT COUNT(*) FROM warnings WHERE server_id = ? AND user_id = ?", (ctx.guild.id, member.id))
+        total = c.fetchone()[0]
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f"Added {amount} karma to {member.mention}.", color=discord.Color.green())
+        embed = make_embed(title="\u26a0\ufe0f Member Warned", color=Colors.WARNING, ctx=ctx)
+        embed.add_field(name="Member", value=member.mention, inline=True)
+        embed.add_field(name="Warn ID", value=f"`#{warn_id}`", inline=True)
+        embed.add_field(name="Total Warnings", value=f"`{total}`", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.command(alias='sprefix')
+    @commands.hybrid_command(aliases=["warns", "infractions"])
+    async def warnings(self, ctx, member: discord.Member = None):
+        """View warnings for a member."""
+        member = member or ctx.author
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT id, moderator_id, reason, timestamp FROM warnings WHERE server_id = ? AND user_id = ? ORDER BY id DESC LIMIT 10", (ctx.guild.id, member.id))
+        rows = c.fetchall()
+        conn.close()
+        if not rows:
+            return await ctx.send(embed=make_embed(description=f"{member.mention} has no warnings. \U0001f389", color=Colors.SUCCESS, ctx=ctx))
+        desc = ""
+        for warn_id, mod_id, reason, ts in rows:
+            desc += f"**#{warn_id}** \u2014 <@{mod_id}>\n> {reason}\n> <t:{int(datetime.fromisoformat(ts).timestamp())}:R>\n\n"
+        embed = make_embed(
+            title=f"\u26a0\ufe0f Warnings for {member.display_name}",
+            description=desc, color=Colors.WARNING, ctx=ctx,
+            thumbnail=member.display_avatar.url
+        )
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(aliases=["clearwarns", "delwarns"])
+    @has_permissions(manage_messages=True)
+    async def clearwarnings(self, ctx, member: discord.Member):
+        """Clear all warnings for a member."""
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM warnings WHERE server_id = ? AND user_id = ?", (ctx.guild.id, member.id))
+        conn.commit()
+        conn.close()
+        await ctx.send(embed=success_embed(f"Cleared all warnings for {member.mention}.", ctx))
+
+    @commands.hybrid_command()
+    @has_permissions(manage_messages=True)
+    async def delwarn(self, ctx, warn_id: int):
+        """Delete a specific warning by ID."""
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM warnings WHERE id = ? AND server_id = ?", (warn_id, ctx.guild.id))
+        if c.rowcount == 0:
+            conn.close()
+            return await ctx.send(embed=error_embed(f"Warning `#{warn_id}` not found.", ctx))
+        conn.commit()
+        conn.close()
+        await ctx.send(embed=success_embed(f"Deleted warning `#{warn_id}`.", ctx))
+
+    # ── Server Settings ─────────────────────────────────────
+
+    @commands.hybrid_command(aliases=["prefix"])
     @has_permissions(manage_guild=True)
-    async def setprefix(self, ctx: Context, prefix: str):
+    async def setprefix(self, ctx, prefix: str):
         """Set the server's command prefix."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
         c.execute("UPDATE server_settings SET prefix = ? WHERE server_id = ?", (prefix, ctx.guild.id))
         conn.commit()
         conn.close()
-        await ctx.send(f"Prefix set to `{prefix}` for this server.")
+        await ctx.send(embed=success_embed(f"Server prefix set to `{prefix}`.", ctx))
 
-    @commands.command(alias='welcomechannel')
+    @commands.hybrid_command()
     @has_permissions(manage_guild=True)
-    async def setwelcomechannel(self, ctx: Context, channel: discord.TextChannel):
-        """Set the welcome channel for the server."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+    async def setwelcomechannel(self, ctx, channel: discord.TextChannel):
+        """Set the welcome channel."""
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
         c.execute("UPDATE server_settings SET welcome_channel_id = ? WHERE server_id = ?", (channel.id, ctx.guild.id))
         conn.commit()
         conn.close()
-        await ctx.send(f"Welcome channel set to {channel.mention}.")
+        await ctx.send(embed=success_embed(f"Welcome channel set to {channel.mention}.", ctx))
 
-    @commands.command(alias='welcomemsg')
+    @commands.hybrid_command()
     @has_permissions(manage_guild=True)
-    async def setwelcomemessage(self, ctx: Context, *, message: str):
-        """Set the welcome message for the server."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+    async def setwelcomemsg(self, ctx, *, message: str):
+        """Set the welcome message. Use {member} for mention, {server} for server name."""
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
         c.execute("UPDATE server_settings SET welcome_message = ? WHERE server_id = ?", (message, ctx.guild.id))
         conn.commit()
         conn.close()
-        await ctx.send("Welcome message updated.")
+        await ctx.send(embed=success_embed("Welcome message updated.", ctx))
 
-    @commands.command(alias='levelingxp')
+    @commands.hybrid_command()
     @has_permissions(manage_guild=True)
-    async def setlevelingxp(self, ctx: Context, per_message: int = None, per_reaction: int = None, per_command: int = None):
-        """Set XP per message, reaction, and command for leveling (any can be omitted)."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
-        if per_message is not None:
-            c.execute("UPDATE server_settings SET leveling_xp_per_message = ? WHERE server_id = ?", (per_message, ctx.guild.id))
-        if per_reaction is not None:
-            c.execute("UPDATE server_settings SET leveling_xp_per_reaction = ? WHERE server_id = ?", (per_reaction, ctx.guild.id))
-        if per_command is not None:
-            c.execute("UPDATE server_settings SET leveling_xp_per_command = ? WHERE server_id = ?", (per_command, ctx.guild.id))
-        conn.commit()
-        conn.close()
-        await ctx.send("Leveling XP settings updated.")
-
-    @commands.command(alias='levelchannel')
-    @has_permissions(manage_guild=True)
-    async def setlevelingchannel(self, ctx: Context, channel: discord.TextChannel):
-        """Set the channel for leveling up messages."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+    async def setlevelchannel(self, ctx, channel: discord.TextChannel):
+        """Set the level-up announcement channel."""
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
         c.execute("UPDATE server_settings SET leveling_channel_id = ? WHERE server_id = ?", (channel.id, ctx.guild.id))
         conn.commit()
         conn.close()
-        await ctx.send(f"Leveling channel set to {channel.mention}.")
+        await ctx.send(embed=success_embed(f"Level-up channel set to {channel.mention}.", ctx))
 
-    @commands.command(alias='levelmessage')
+    @commands.hybrid_command()
     @has_permissions(manage_guild=True)
-    async def setlevelingmessage(self, ctx: Context, *, message: str):
-        """Set the message for leveling up announcements."""
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'database.db'))
-        conn = sqlite3.connect(db_path)
+    async def setlevelmsg(self, ctx, *, message: str):
+        """Set the level-up message. Use {member} and {level}."""
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO server_settings (server_id) VALUES (?)", (ctx.guild.id,))
         c.execute("UPDATE server_settings SET leveling_message = ? WHERE server_id = ?", (message, ctx.guild.id))
         conn.commit()
         conn.close()
-        await ctx.send("Leveling up message updated.")
+        await ctx.send(embed=success_embed("Level-up message updated.", ctx))
 
-async def setup(bot: Bot):
+
+async def setup(bot):
     await bot.add_cog(Moderation(bot))

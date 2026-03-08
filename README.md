@@ -1,4 +1,4 @@
-# AetherX Bot 🤖  
+# Project SHDW 🤖  
 *A multipurpose Discord bot packed with mini-games, utilities, and fun!*
 
 ---

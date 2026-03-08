@@ -2,7 +2,7 @@
 
 > **Note:** This project is currently under an overhaul. Features, documentation, and structure may change frequently.
 
-Thank you for considering a donation to support AetherX! Your contributions help us maintain, improve, and expand the bot, ensuring it remains available for everyone.
+Thank you for considering a donation to support Project SHDW! Your contributions help us maintain, improve, and expand the bot, ensuring it remains available for everyone.
 
 ## Why Donate?
 
@@ -20,7 +20,7 @@ By donating, you directly support:
 
 You can support us through the following platforms:
 - [Cashapp](https://cash.app/$androgalaxi)
-- [Github Sponsers](https://github.com/sponsors/AetherX-Discord-bot)
+- [Github Sponsors](https://github.com/sponsors/Project-SHDW)
 
 ### Other Ways to Support
 
@@ -31,6 +31,6 @@ Not in a position to donate? You can still help us by:
 
 ## Special Thanks
 
-We deeply appreciate every donation, big or small. Your support keeps AetherX running and improving for everyone!
+We deeply appreciate every donation, big or small. Your support keeps Project SHDW running and improving for everyone!
 
-If you have any questions or concerns about donations, feel free to reach out to us at [AetherXdevs@outlook.com](mailto:AetherXdevs@outlook.com).
+If you have any questions or concerns about donations, feel free to reach out to us on the support server.

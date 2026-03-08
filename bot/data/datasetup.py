@@ -1,98 +1,70 @@
-import os
 import sqlite3
+import os
 
-# Path to the database file (ensure it is always relative to this script)
-DB_PATH = os.path.join(os.path.dirname(__file__), "database.db")
+
+DB_PATH = os.path.join(os.path.dirname(__file__), 'database.db')
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def setup_database():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    conn = get_db()
+    cursor = conn.cursor()
 
-    # Create servers table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS servers (
-            server_id INTEGER PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            blacklisted_status BOOLEAN DEFAULT 0,
-            whitelisted_status BOOLEAN DEFAULT 0,
-            invite_link TEXT
-        )
-    ''')
-
-    # Create users table
-    c.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            display_name TEXT,
-            username TEXT,
-            personal_prefix TEXT,
-            bio TEXT,
-            profile_picture TEXT,
-            dm_enabled BOOLEAN DEFAULT 0,
-            show_status BOOLEAN DEFAULT 0,
-            show_dabloons BOOLEAN DEFAULT 0,
-            dabloons REAL DEFAULT 0,
-            karma INTEGER DEFAULT 0,
-            xp REAL DEFAULT 0,
-            level INTEGER DEFAULT 1
+            dabloons INTEGER DEFAULT 0,
+            bio TEXT DEFAULT '',
+            dm_notifications INTEGER DEFAULT 1,
+            show_status INTEGER DEFAULT 1,
+            show_dabloons INTEGER DEFAULT 1,
+            daily_last TEXT DEFAULT '',
+            weekly_last TEXT DEFAULT ''
         )
-    ''')
+    """)
 
-    c.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS server_settings (
             server_id INTEGER PRIMARY KEY,
-            prefix TEXT,
-            welcome_channel_id INTEGER,
-            welcome_message TEXT,
-            leveling_channel_id INTEGER,
-            leveling_message TEXT,
-            leveling_xp_per_message INTEGER DEFAULT 10,
-            leveling_xp_per_reaction INTEGER DEFAULT 5,
-            leveling_xp_per_command INTEGER DEFAULT 0
+            prefix TEXT DEFAULT '.',
+            welcome_channel INTEGER DEFAULT 0,
+            welcome_msg TEXT DEFAULT 'Welcome {user} to {server}!',
+            level_channel INTEGER DEFAULT 0,
+            level_msg TEXT DEFAULT '{user} just reached level {level}!'
         )
-    ''')
-    
-    c.execute('''
+    """)
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS server_leveling (
-            server_id INTEGER PRIMARY KEY,
+            server_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             xp INTEGER DEFAULT 0,
-            level INTEGER DEFAULT 1
+            level INTEGER DEFAULT 0,
+            total_xp INTEGER DEFAULT 0,
+            PRIMARY KEY (server_id, user_id)
         )
-    ''')
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS warnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            moderator_id INTEGER NOT NULL,
+            reason TEXT DEFAULT 'No reason provided',
+            timestamp TEXT NOT NULL
+        )
+    """)
 
     conn.commit()
     conn.close()
+    print("[DATABASE] All tables verified/created.")
 
-if __name__ == "__main__":
-    def has_data():
-        if not os.path.exists(DB_PATH):
-            return False
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT 1 FROM servers LIMIT 1")
-            if c.fetchone():
-                conn.close()
-                return True
-            c.execute("SELECT 1 FROM users LIMIT 1")
-            if c.fetchone():
-                conn.close()
-                return True
-            conn.close()
-        except Exception:
-            return False
-        return False
 
-    if os.path.exists(DB_PATH) and has_data():
-        confirm = input(f"Database already exists at {DB_PATH} and contains data. Do you want to reset it? (y/n): ").strip().lower()
-        if confirm == 'y':
-            os.remove(DB_PATH)
-            print("Database file removed. Setting up a new database...")
-            setup_database()
-            print(f"Database reset complete. Database file: {DB_PATH}")
-        else:
-            print("Database setup aborted. Existing database was not changed.")
-    else:
-        setup_database()
-        print(f"Database setup complete. Database file: {DB_PATH}")
+if __name__ == '__main__':
+    setup_database()
